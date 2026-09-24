@@ -45,27 +45,64 @@
       </div>
     </div>
 
-    <div class="detail-grid">
-      <!-- 左：剧本 -->
-      <section class="panel script-panel">
-        <div class="panel-head">
-          <h3 id="scriptPanelTitle">剧本</h3>
-          <span class="hint" id="scriptModeHint">点击任意台词行，可在旁边添加提示</span>
-        </div>
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tabCueBtn">🎬 剧本与提示单</button>
+      <button class="tab-btn" id="tabRunBtn">🗂️ 排练执行台</button>
+    </div>
 
-        <div id="scriptViewer" class="script-viewer"></div>
-        <textarea id="scriptEditor" class="textarea script-editor hidden" rows="24"></textarea>
-      </section>
+    <div id="cueTab">
+      <div class="detail-grid">
+        <!-- 左：剧本 -->
+        <section class="panel script-panel">
+          <div class="panel-head">
+            <h3 id="scriptPanelTitle">剧本</h3>
+            <span class="hint" id="scriptModeHint">点击任意台词行，可在旁边添加提示</span>
+          </div>
 
-      <!-- 右：提示单 -->
-      <section class="panel cues-panel">
-        <div class="panel-head">
-          <h3>提示单</h3>
-          <div id="cueStats" class="cue-stats"></div>
-        </div>
-        <div id="pendingPanel" class="pending-panel hidden"></div>
-        <div id="cueList" class="cue-list"></div>
-      </section>
+          <div id="scriptViewer" class="script-viewer"></div>
+          <textarea id="scriptEditor" class="textarea script-editor hidden" rows="24"></textarea>
+        </section>
+
+        <!-- 右：提示单 -->
+        <section class="panel cues-panel">
+          <div class="panel-head">
+            <h3>提示单</h3>
+            <div id="cueStats" class="cue-stats"></div>
+          </div>
+          <div id="pendingPanel" class="pending-panel hidden"></div>
+          <div id="cueList" class="cue-list"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- 排练执行台 -->
+    <div id="runTab" class="hidden">
+      <div class="detail-grid run-grid">
+        <!-- 左：创建场次 + 当前场次执行 -->
+        <section class="panel">
+          <div class="panel-head">
+            <h3>创建排练场次</h3>
+          </div>
+          <div id="runCreateBox" class="run-create-box">
+            <div id="runPreview" class="hint">正在读取当前版本提示…</div>
+            <div class="run-create-form">
+              <input id="runName" class="input" type="text" placeholder="场次名称（可选，默认「剧名 · 第N版排练」）" />
+              <button class="btn btn-primary" id="runCreateBtn">从当前版本创建场次</button>
+            </div>
+          </div>
+
+          <div id="activeSessionBox" class="run-active-box"></div>
+        </section>
+
+        <!-- 右：历次场次 -->
+        <section class="panel">
+          <div class="panel-head">
+            <h3>历次场次</h3>
+            <span class="hint">快照与执行记录永久保留，剧本改版不影响旧场次</span>
+          </div>
+          <div id="sessionHistory" class="session-history"></div>
+        </section>
+      </div>
     </div>
   </main>
 

@@ -4,12 +4,18 @@
 
 const state = {
   view: 'list', // 'list' | 'detail'
+  tab: 'cue', // 'cue' | 'run'
   mode: 'view', // 'view' | 'edit'
   script: null, // 当前剧本详情 { id, title, content, current_version, cues }
   cueModal: null, // { mode:'add', lineNo } | { mode:'edit', cue }
   rebindCue: null, // 正在重绑的提示
   rebindTarget: null, // 重绑弹窗中暂选行号
   flashLineNo: null, // 渲染后需要高亮的行
+  run: {
+    preview: null, // 创建前预览 { version, total, excluded_pending, cues }
+    sessions: [], // 历次场次摘要
+    activeSession: null, // 当前打开的场次完整状态
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -42,7 +48,11 @@ async function api(method, url, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `请求失败 (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -129,10 +139,12 @@ $('createBtn').addEventListener('click', async () => {
 
 async function openScript(id) {
   state.script = await api('GET', `/api/scripts/${id}`);
+  state.run = { preview: null, sessions: [], activeSession: null };
   $('detailTitle').textContent = state.script.title;
   $('topbarSub').textContent = state.script.title;
   $('scriptEditor').value = state.script.content;
   setMode('view');
+  switchTab('cue');
   renderDetail();
   showView('detail');
 }
@@ -474,6 +486,299 @@ $('rebindCancelBtn').addEventListener('click', () => {
 });
 $('rebindModal').addEventListener('click', (e) => {
   if (e.target === $('rebindModal')) $('rebindModal').classList.add('hidden');
+});
+
+/* =============================== 标签页切换 =============================== */
+
+function switchTab(tab) {
+  state.tab = tab;
+  $('cueTab').classList.toggle('hidden', tab !== 'cue');
+  $('runTab').classList.toggle('hidden', tab !== 'run');
+  $('tabCueBtn').classList.toggle('active', tab === 'cue');
+  $('tabRunBtn').classList.toggle('active', tab === 'run');
+  if (tab === 'run') loadRunTab();
+}
+
+$('tabCueBtn').addEventListener('click', () => switchTab('cue'));
+$('tabRunBtn').addEventListener('click', () => switchTab('run'));
+
+/* =============================== 排练执行台 =============================== */
+
+async function loadRunTab() {
+  const id = state.script.id;
+  $('runPreview').textContent = '正在读取当前版本提示…';
+  try {
+    const [preview, sessions] = await Promise.all([
+      api('GET', `/api/scripts/${id}/sessions/preview`),
+      api('GET', `/api/scripts/${id}/sessions`),
+    ]);
+    state.run.preview = preview;
+    state.run.sessions = sessions;
+    renderCreateBox();
+    renderSessionHistory();
+
+    // 默认打开最近一场（刷新页面后可在此恢复进度）
+    const keep = state.run.activeSession;
+    const target =
+      keep && sessions.some((s) => s.id === keep.id)
+        ? keep.id
+        : sessions.length
+          ? sessions[0].id
+          : null;
+    if (target) {
+      await openRunSession(target);
+    } else {
+      state.run.activeSession = null;
+      renderActiveSession();
+    }
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/** 创建前的预览面板：显示将冻结条目数与待确认排除数 */
+function renderCreateBox() {
+  const p = state.run.preview;
+  const box = $('runPreview');
+  if (!p) {
+    box.textContent = '暂无预览';
+    return;
+  }
+  box.innerHTML = `
+    <div class="run-preview-line">
+      将基于剧本<strong>第 ${p.version} 版</strong>冻结当前已绑定提示，
+      共 <strong>${p.total}</strong> 条可执行条目
+      （按行号、提示 ID 排序）。
+    </div>
+    <div class="run-preview-line ${p.excluded_pending ? 'has-pending' : ''}">
+      ${
+        p.excluded_pending
+          ? `⚠ 有 <strong>${p.excluded_pending}</strong> 条待确认提示未定位，将被排除在场次之外；请先在「剧本与提示单」中重新绑定。`
+          : '没有待确认提示被排除。'
+      }
+    </div>`;
+  $('runCreateBtn').disabled = p.total === 0;
+  $('runCreateBtn').textContent =
+    p.total === 0 ? '无可执行提示，不能创建场次' : '从当前版本创建场次';
+}
+
+$('runCreateBtn').addEventListener('click', async () => {
+  const name = $('runName').value.trim();
+  try {
+    const r = await api('POST', `/api/scripts/${state.script.id}/sessions`, { name });
+    $('runName').value = '';
+    toast('场次已创建，提示行号/类型/内容/备注已冻结');
+    await loadRunTab();
+    await openRunSession(r.id);
+  } catch (err) {
+    if (err.status === 409) {
+      toast(err.message, true);
+      loadRunTab(); // 进度/数据可能已变，静默刷新
+    } else {
+      toast(err.message, true);
+    }
+  }
+});
+
+async function openRunSession(sessionId) {
+  try {
+    state.run.activeSession = await api('GET', `/api/sessions/${sessionId}`);
+    renderActiveSession();
+    renderSessionHistory();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function renderActiveSession() {
+  const box = $('activeSessionBox');
+  const s = state.run.activeSession;
+  if (!s) {
+    box.innerHTML = '<div class="empty">还没有场次，从上方创建一场开始排练。</div>';
+    return;
+  }
+
+  const head = s.items[s.progress] || null; // 队首（0-based 进度直接当下标）
+  const headItem = head
+    ? `
+    <div class="run-head ${head.type === 'light' ? 'is-light' : 'is-sound'}">
+      <div class="run-head-top">
+        <span class="run-head-idx">下一条 · #${head.seq}</span>
+        <span class="badge ${head.type === 'light' ? 'badge-light' : 'badge-sound'}">
+          ${head.type === 'light' ? '💡 灯光' : '🔊 音效'}
+        </span>
+        <span class="run-head-label">${escapeHtml(head.label)}</span>
+      </div>
+      <div class="run-head-line">📖 第 ${head.line_no} 行：${escapeHtml(head.line_text)}</div>
+      ${head.note ? `<div class="run-head-note">📝 ${escapeHtml(head.note)}</div>` : ''}
+    </div>`
+    : `<div class="run-head run-done">🎉 本场次 ${s.total} 条提示已全部执行完毕</div>`;
+
+  box.innerHTML = `
+    <div class="run-session-head">
+      <div class="run-session-title">${escapeHtml(s.name)}</div>
+      <div class="run-session-meta">
+        <span class="badge badge-version">v${s.script_version} 快照</span>
+        <span>共 ${s.total} 条 · 已执行 ${s.progress} 条</span>
+        ${s.is_complete ? '<span class="badge badge-ok">已完成</span>' : ''}
+      </div>
+    </div>
+
+    <div class="run-progress-bar">
+      <div class="run-progress-fill" style="width:${s.total ? (s.progress / s.total) * 100 : 0}%"></div>
+    </div>
+
+    ${headItem}
+
+    <div class="run-controls">
+      <button class="btn btn-primary" id="executeBtn"
+        ${!head || s.is_complete ? 'disabled' : ''}>
+        ▶ 执行队首（#${head ? head.seq : '—'}）
+      </button>
+      <button class="btn" id="undoBtn" ${s.progress === 0 ? 'disabled' : ''}>
+        ↩ 撤回最后一条
+      </button>
+      <span class="hint" id="runConflictHint"></span>
+    </div>
+
+    <h4 class="run-subhead">提示队列（创建时冻结）</h4>
+    <div class="run-queue">
+      ${s.items
+        .map((it) => {
+          const isHead = head && it.id === head.id;
+          const cls = it.executed ? 'done' : isHead ? 'head' : 'pending';
+          const stateTag = it.executed
+            ? '<span class="run-tag tag-done">已执行</span>'
+            : isHead
+              ? '<span class="run-tag tag-head">队首</span>'
+              : '<span class="run-tag tag-pending">待执行</span>';
+          return `
+          <div class="run-item ${cls}">
+            <span class="run-item-idx">#${it.seq}</span>
+            ${stateTag}
+            <span class="badge ${it.type === 'light' ? 'badge-light' : 'badge-sound'}">
+              ${it.type === 'light' ? '💡' : '🔊'}
+            </span>
+            <span class="run-item-line">第 ${it.line_no} 行</span>
+            <span class="run-item-label">${escapeHtml(it.label)}</span>
+            ${it.note ? `<span class="run-item-note">📝 ${escapeHtml(it.note)}</span>` : ''}
+          </div>`;
+        })
+        .join('')}
+    </div>
+
+    <h4 class="run-subhead">执行记录</h4>
+    <div class="run-log">
+      ${
+        s.executions.length === 0
+          ? '<div class="empty" style="padding:12px 0">尚无执行记录。</div>'
+          : s.executions
+              .slice()
+              .reverse()
+              .map(
+                (e) => `
+            <div class="run-log-row">
+              <span class="run-log-time">${escapeHtml(e.executed_at)}</span>
+              <span class="run-log-idx">#${e.seq}</span>
+              <span class="badge ${e.type === 'light' ? 'badge-light' : 'badge-sound'}">
+                ${e.type === 'light' ? '💡' : '🔊'}
+              </span>
+              <span class="run-item-label">${escapeHtml(e.label)}</span>
+              <span class="run-item-line">第 ${e.line_no} 行</span>
+            </div>`
+              )
+              .join('')
+      }
+    </div>`;
+
+  $('executeBtn').addEventListener('click', () => executeItem(head.id));
+  $('undoBtn').addEventListener('click', undoLast);
+}
+
+async function executeItem(itemId) {
+  const s = state.run.activeSession;
+  const expectedProgress = s.progress;
+  const btn = $('executeBtn');
+  btn.disabled = true;
+  try {
+    await api('POST', `/api/sessions/${s.id}/execute`, { itemId, expectedProgress });
+    await refreshActiveSession();
+  } catch (err) {
+    handleRunConflict(err);
+  } finally {
+    if (document.body.contains(btn)) btn.disabled = false;
+  }
+}
+
+async function undoLast() {
+  const s = state.run.activeSession;
+  const expectedProgress = s.progress;
+  const btn = $('undoBtn');
+  btn.disabled = true;
+  try {
+    await api('POST', `/api/sessions/${s.id}/undo`, { expectedProgress });
+    await refreshActiveSession();
+  } catch (err) {
+    handleRunConflict(err);
+  } finally {
+    if (document.body.contains(btn)) btn.disabled = false;
+  }
+}
+
+/** 冲突（过期/重复/越序）：刷新场次恢复真实进度，不推进下一条 */
+function handleRunConflict(err) {
+  if (err.status === 409) {
+    toast(`冲突：${err.message}`, true);
+    refreshActiveSession();
+    refreshHistory();
+  } else {
+    toast(err.message, true);
+  }
+}
+
+async function refreshActiveSession() {
+  const s = state.run.activeSession;
+  if (!s) return;
+  state.run.activeSession = await api('GET', `/api/sessions/${s.id}`);
+  renderActiveSession();
+  refreshHistory();
+}
+
+async function refreshHistory() {
+  state.run.sessions = await api('GET', `/api/scripts/${state.script.id}/sessions`);
+  renderSessionHistory();
+}
+
+function renderSessionHistory() {
+  const box = $('sessionHistory');
+  const list = state.run.sessions;
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">暂无历史场次。</div>';
+    return;
+  }
+  const activeId = state.run.activeSession ? state.run.activeSession.id : null;
+  box.innerHTML = list
+    .map((s) => {
+      const pct = s.total ? Math.round((s.progress / s.total) * 100) : 0;
+      return `
+      <div class="session-item ${s.id === activeId ? 'active' : ''}" data-session="${s.id}">
+        <div class="session-item-top">
+          <span class="session-item-name">${escapeHtml(s.name)}</span>
+          ${s.is_complete ? '<span class="badge badge-ok">已完成</span>' : ''}
+        </div>
+        <div class="session-item-meta">
+          v${s.script_version} · ${s.total} 条 · 已执行 ${s.progress} 条（${pct}%）
+          ${s.excluded_pending ? ` · 排除待确认 ${s.excluded_pending} 条` : ''}
+        </div>
+        <div class="session-item-time">创建于 ${escapeHtml(s.created_at)}</div>
+      </div>`;
+    })
+    .join('');
+}
+
+$('sessionHistory').addEventListener('click', (e) => {
+  const item = e.target.closest('.session-item');
+  if (item) openRunSession(Number(item.dataset.session));
 });
 
 /* =============================== 编辑剧本 =============================== */
