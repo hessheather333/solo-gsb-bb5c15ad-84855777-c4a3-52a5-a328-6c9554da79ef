@@ -67,6 +67,43 @@
         <div id="cueList" class="cue-list"></div>
       </section>
     </div>
+
+    <!-- 排练执行台 -->
+    <section class="panel run-panel">
+      <div class="panel-head">
+        <h3>排练执行台</h3>
+        <div id="runSummary" class="cue-stats"></div>
+      </div>
+      <p class="hint" id="runHint"></p>
+      <button class="btn btn-primary" id="createSessionBtn">创建场次</button>
+      <div id="sessionList" class="session-list"></div>
+    </section>
+  </main>
+
+  <!-- 场次执行台视图 -->
+  <main id="sessionView" class="view hidden">
+    <div class="detail-head">
+      <button class="btn btn-ghost" id="sessionBackBtn">← 返回剧本</button>
+      <h2 id="sessionTitle" class="detail-title"></h2>
+      <span id="sessionVersionBadge" class="badge badge-version"></span>
+      <span id="sessionStatusBadge" class="badge badge-version"></span>
+      <div class="detail-actions">
+        <button class="btn btn-warn hidden" id="undoBtn">↩ 撤回上一条</button>
+      </div>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+      <div id="progressText" class="hint progress-text"></div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h3>执行队列（创建时冻结的快照）</h3>
+        <span class="hint">仅队首可执行；此后剧本改版或提示编辑均不影响本场次</span>
+      </div>
+      <div id="entryList" class="entry-list"></div>
+    </section>
   </main>
 
   <!-- 添加/编辑提示弹窗 -->

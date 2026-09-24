@@ -49,8 +49,37 @@ CREATE TABLE IF NOT EXISTS cues (
   updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  script_id      INTEGER NOT NULL REFERENCES scripts(id) ON DELETE CASCADE,
+  name           TEXT    NOT NULL,
+  script_version INTEGER NOT NULL,
+  total          INTEGER NOT NULL,
+  executed_count INTEGER NOT NULL DEFAULT 0,
+  status         TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed')),
+  created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS session_entries (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  cue_id      INTEGER NOT NULL,
+  line_no     INTEGER NOT NULL,
+  line_text   TEXT,
+  type        TEXT    NOT NULL CHECK (type IN ('light', 'sound')),
+  label       TEXT    NOT NULL,
+  note        TEXT    NOT NULL DEFAULT '',
+  status      TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done')),
+  executed_at TEXT,
+  UNIQUE (session_id, seq)
+);
+
 CREATE INDEX IF NOT EXISTS idx_cues_script ON cues(script_id);
 CREATE INDEX IF NOT EXISTS idx_versions_script ON script_versions(script_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_script ON sessions(script_id);
+CREATE INDEX IF NOT EXISTS idx_entries_session ON session_entries(session_id);
 `);
 
 module.exports = db;

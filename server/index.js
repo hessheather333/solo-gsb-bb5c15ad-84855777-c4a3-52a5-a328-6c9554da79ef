@@ -266,6 +266,168 @@ app.delete('/api/cues/:cueId', (req, res) => {
   res.json({ ok: true });
 });
 
+/* ----------------------------- 排练场次接口 ----------------------------- */
+
+function getSessionOr404(sessionId) {
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+  if (!session) {
+    const e = new Error('场次不存在');
+    e.status = 404;
+    throw e;
+  }
+  return session;
+}
+
+// 某剧本的历次场次（新→旧）
+app.get('/api/scripts/:id/sessions', (req, res) => {
+  const script = getScriptOr404(req.params.id);
+  const sessions = db
+    .prepare(
+      `SELECT id, script_id, name, script_version, total, executed_count, status, created_at, updated_at
+       FROM sessions WHERE script_id = ? ORDER BY id DESC`
+    )
+    .all(script.id);
+  res.json(sessions);
+});
+
+/**
+ * 创建场次：冻结当前版本全部已绑定提示（行号/台词/类型/内容/备注），
+ * 按行号 + 提示 ID 排序生成执行队列；待确认提示被排除；
+ * 没有可执行提示时不创建空场次。
+ */
+app.post('/api/scripts/:id/sessions', (req, res) => {
+  const script = getScriptOr404(req.params.id);
+  const bound = db
+    .prepare(
+      `SELECT * FROM cues
+       WHERE script_id = ? AND anchor_status = 'bound' AND line_no IS NOT NULL
+       ORDER BY line_no, id`
+    )
+    .all(script.id);
+  const excluded = db
+    .prepare("SELECT COUNT(*) AS n FROM cues WHERE script_id = ? AND anchor_status = 'pending'")
+    .get(script.id).n;
+
+  if (bound.length === 0) {
+    return res.status(400).json({ error: '没有可执行的已绑定提示，未创建空场次' });
+  }
+
+  const sessionId = db.transaction(() => {
+    const seqNo =
+      db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE script_id = ?').get(script.id).n + 1;
+    const name = (req.body.name || '').trim() || `第 ${seqNo} 场`;
+    const info = db
+      .prepare('INSERT INTO sessions (script_id, name, script_version, total) VALUES (?, ?, ?, ?)')
+      .run(script.id, name, script.current_version, bound.length);
+    const sid = info.lastInsertRowid;
+    const ins = db.prepare(
+      `INSERT INTO session_entries (session_id, seq, cue_id, line_no, line_text, type, label, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    bound.forEach((c, i) => {
+      ins.run(sid, i + 1, c.id, c.line_no, c.line_text, c.type, c.label, c.note);
+    });
+    return sid;
+  })();
+
+  res.status(201).json({ id: sessionId, total: bound.length, excluded });
+});
+
+// 场次详情：冻结快照 + 执行记录
+app.get('/api/sessions/:id', (req, res) => {
+  const session = getSessionOr404(req.params.id);
+  const script = db.prepare('SELECT title FROM scripts WHERE id = ?').get(session.script_id);
+  const entries = db
+    .prepare('SELECT * FROM session_entries WHERE session_id = ? ORDER BY seq')
+    .all(session.id);
+  res.json({ ...session, script_title: script ? script.title : '', entries });
+});
+
+/**
+ * 执行队首条目。客户端须提交目标条目 entryId 与预期进度 expectedExecuted：
+ *  - 条目已执行（重复提交）        -> 409
+ *  - 预期进度与当前不符（请求过期） -> 409
+ *  - 目标不是队首                  -> 409
+ * 冲突时不写入任何数据，队列不推进。
+ */
+app.post('/api/sessions/:id/execute', (req, res) => {
+  const session = getSessionOr404(req.params.id);
+  const entryId = Number(req.body.entryId);
+  const expected = Number(req.body.expectedExecuted);
+  if (!Number.isInteger(entryId)) return res.status(400).json({ error: '缺少目标条目 entryId' });
+  if (!Number.isInteger(expected)) {
+    return res.status(400).json({ error: '缺少预期进度 expectedExecuted' });
+  }
+
+  const entry = db
+    .prepare('SELECT * FROM session_entries WHERE id = ? AND session_id = ?')
+    .get(entryId, session.id);
+  if (!entry) return res.status(404).json({ error: '目标条目不存在' });
+  if (entry.status === 'done') {
+    return res.status(409).json({ error: '该条目已执行，请勿重复提交' });
+  }
+  if (expected !== session.executed_count) {
+    return res.status(409).json({ error: '请求已过期：执行进度已变化，请刷新后重试' });
+  }
+  const head = db
+    .prepare(
+      "SELECT * FROM session_entries WHERE session_id = ? AND status = 'pending' ORDER BY seq LIMIT 1"
+    )
+    .get(session.id);
+  if (!head || head.id !== entry.id) {
+    return res.status(409).json({ error: '一次只能执行队首条目' });
+  }
+
+  db.transaction(() => {
+    db.prepare(
+      "UPDATE session_entries SET status = 'done', executed_at = datetime('now') WHERE id = ?"
+    ).run(entry.id);
+    const newCount = session.executed_count + 1;
+    db.prepare(
+      "UPDATE sessions SET executed_count = ?, status = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run(newCount, newCount === session.total ? 'completed' : 'active', session.id);
+  })();
+
+  res.json({ ok: true, executedCount: session.executed_count + 1 });
+});
+
+/**
+ * 撤回最后执行的一条。仅最后一条已执行条目可撤回；
+ * 预期进度不符（过期）或没有已执行条目（重复撤回）时返回 409。
+ */
+app.post('/api/sessions/:id/undo', (req, res) => {
+  const session = getSessionOr404(req.params.id);
+  const expected = Number(req.body.expectedExecuted);
+  if (!Number.isInteger(expected)) {
+    return res.status(400).json({ error: '缺少预期进度 expectedExecuted' });
+  }
+  if (expected !== session.executed_count) {
+    return res.status(409).json({ error: '请求已过期：执行进度已变化，请刷新后重试' });
+  }
+  const last = db
+    .prepare(
+      "SELECT * FROM session_entries WHERE session_id = ? AND status = 'done' ORDER BY seq DESC LIMIT 1"
+    )
+    .get(session.id);
+  if (!last) {
+    return res.status(409).json({ error: '没有可撤回的执行记录' });
+  }
+  if (req.body.entryId !== undefined && Number(req.body.entryId) !== last.id) {
+    return res.status(409).json({ error: '仅可撤回最后执行的一条' });
+  }
+
+  db.transaction(() => {
+    db.prepare(
+      "UPDATE session_entries SET status = 'pending', executed_at = NULL WHERE id = ?"
+    ).run(last.id);
+    db.prepare(
+      "UPDATE sessions SET executed_count = executed_count - 1, status = 'active', updated_at = datetime('now') WHERE id = ?"
+    ).run(session.id);
+  })();
+
+  res.json({ ok: true, executedCount: session.executed_count - 1, undoneEntryId: last.id });
+});
+
 /* ----------------------------- 错误处理 ----------------------------- */
 
 app.use((err, req, res, next) => {
